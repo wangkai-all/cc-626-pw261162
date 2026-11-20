@@ -1,0 +1,14 @@
+{
+  "name": "pointwise-delivery",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "工单估时留版与误差评估本地演示（计划工时 / 追加需求 / 实际工时独立留版）",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

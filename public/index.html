@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>工单估时留版与误差评估</title>
+<style>
+  :root {
+    --line: #d8dee6;
+    --muted: #6b7684;
+    --accent: #1f6feb;
+    --good: #1a7f37;
+    --warn: #b45309;
+    --bad: #b42318;
+    --bg: #f6f8fa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #1f2328; background: var(--bg);
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 20px 0 8px; }
+  .sub { color: var(--muted); margin: 0 0 16px; }
+  .card {
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .principles li { margin-bottom: 4px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  input, select {
+    padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px;
+    font: inherit; min-width: 130px;
+  }
+  button {
+    padding: 8px 14px; border: 1px solid var(--accent); border-radius: 7px;
+    background: var(--accent); color: #fff; font: inherit; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: .55; cursor: wait; }
+  .mode-box { display: flex; gap: 14px; align-items: center; padding: 6px 0; }
+  .mode-box label { display: flex; gap: 5px; align-items: center; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: right; }
+  th:first-child, td:first-child, td.label { text-align: left; }
+  thead th { background: #f0f3f6; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
+  .tag-S { background: #e6f4ea; color: var(--good); }
+  .tag-M { background: #fff4e0; color: var(--warn); }
+  .tag-L { background: #fde8e6; color: var(--bad); }
+  .pos { color: var(--bad); }
+  .neg { color: var(--good); }
+  .muted { color: var(--muted); }
+  .flash { padding: 9px 12px; border-radius: 8px; margin-bottom: 12px; display: none; }
+  .flash.ok { display: block; background: #e6f4ea; color: var(--good); }
+  .flash.err { display: block; background: #fde8e6; color: var(--bad); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  code { background: #eef1f4; padding: 1px 5px; border-radius: 5px; }
+  .timeline-row { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); }
+  .badge.baseline { background: #eef3ff; }
+  .badge.scope_change { background: #fff4e0; }
+  .badge.replan { background: #f3e8ff; }
+  .badge.actual { background: #e6f4ea; }
+</style>
+</head>
+<body>
+  <h1>工单估时留版与误差评估（本地演示）</h1>
+  <p class="sub">计划工时、追加需求、实际工时三条记录独立追加留版；评估保持最初预测起点，追加事项不改写原目标。</p>
+
+  <section class="card principles">
+    <strong>留版与评估原则</strong>
+    <ul>
+      <li><b>独立留版</b>：baseline（计划）/ scope_change（追加需求）/ replan（阶段重估）/ actual（实际）均为只追加记录，任何补录都不修改历史版本。</li>
+      <li><b>预测起点固定</b>：原 baseline 始终保留；范围变动单列为独立分量，不悄悄抬高或降低原目标。</li>
+      <li><b>两种口径</b>：「范围变动单列」用 baseline 对核心实际；「阶段重估」用累计预测对总实际。</li>
+      <li><b>按规模比较</b>：小（≤24h）/ 中（25–72h）/ 大（&gt;72h）工单分别统计误差与覆盖；缺 baseline 或缺实际的工单剔除并说明原因。</li>
+      <li><b>时间线与差异区间</b>：同一单多个更正逐点保留，给出最小–最大预测区间与首末漂移。</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <div class="mode-box">
+      <strong>评估口径：</strong>
+      <label><input type="radio" name="mode" value="scope_separate" checked /> 范围变动单列</label>
+      <label><input type="radio" name="mode" value="phase_replan" /> 阶段重估</label>
+    </div>
+    <div class="controls">
+      <button id="btn-evaluate" type="button">运行原估时评估</button>
+      <button id="btn-decompose" type="button" class="secondary">查看误差分解</button>
+      <button id="btn-reset" type="button" class="secondary">重置合成数据</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 style="margin-top:0">补录一次范围变化（只追加，不改原目标）</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="scope-order">工单</label>
+        <select id="scope-order"></select>
+      </div>
+      <div class="field">
+        <label for="scope-hours">追加工时（h，replan 可填负数）</label>
+        <input id="scope-hours" type="number" step="0.5" value="8" />
+      </div>
+      <div class="field">
+        <label for="scope-type">记录类型</label>
+        <select id="scope-type">
+          <option value="scope_change" selected>scope_change 追加需求</option>
+          <option value="replan">replan 阶段重估</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="scope-note">说明</label>
+        <input id="scope-note" type="text" value="客户临时追加" />
+      </div>
+      <div class="field">
+        <label for="scope-actual">同时补录实际工时（h，可留空）</label>
+        <input id="scope-actual" type="number" step="0.5" placeholder="留空则不录实际" />
+      </div>
+      <button id="btn-scope" type="button">补录一次范围变化</button>
+    </div>
+  </section>
+
+  <div id="flash" class="flash"></div>
+
+  <!-- 业务结果区：核对操作前后内容请比对该元素的 data-evidence-result -->
+  <section class="card" id="result-card">
+    <h2 style="margin-top:0">业务结果区</h2>
+    <div id="result" data-evidence-result="{}"></div>
+  </section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const resultEl = $('result');
+const flashEl = $('flash');
+
+function currentMode() {
+  return document.querySelector('input[name="mode"]:checked').value;
+}
+
+function showFlash(kind, text) {
+  flashEl.className = 'flash ' + kind;
+  flashEl.textContent = text;
+}
+
+function pct(v, digits = 1) {
+  if (v === null || v === undefined) return '—';
+  return (v * 100).toFixed(digits) + '%';
+}
+function h(v) {
+  if (v === null || v === undefined) return '—';
+  return Number(v).toFixed(1) + 'h';
+}
+function signed(v) {
+  const n = Number(v);
+  const cls = n > 0 ? 'pos' : n < 0 ? 'neg' : 'muted';
+  return `<span class="${cls}">${n > 0 ? '+' : ''}${n.toFixed(1)}h</span>`;
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const data = await res.json();
+  if (!res.ok) throw new Error(`[${data.error}] ${data.message}`);
+  return data;
+}
+
+// 结果区每次渲染都把后端返回的原始 JSON 写入 data-evidence-result，便于核对
+function publish(label, payload, html) {
+  resultEl.setAttribute('data-evidence-result', JSON.stringify({ label, payload }));
+  resultEl.innerHTML = html;
+}
+
+async function loadOrders() {
+  const data = await api('/api/orders');
+  const sel = $('scope-order');
+  sel.innerHTML = data.orders
+    .map((o) => `<option value="${esc(o.id)}"${o.id === 'WO-003' ? ' selected' : ''}>${esc(o.id)}</option>`)
+    .join('');
+}
+
+async function runEvaluation() {
+  const mode = currentMode();
+  const data = await api('/api/evaluate?mode=' + encodeURIComponent(mode));
+  const modeName = mode === 'phase_replan' ? '阶段重估' : '范围变动单列';
+
+  const groupHtml = data.groups.map((g) => `
+    <h2>规模分组 ${g.scale} · ${esc(g.scaleLabel)}（${g.orderCount} 单）</h2>
+    <table>
+      <thead><tr>
+        <th>工单</th><th>规模</th><th>baseline</th><th>追加范围</th><th>重估</th>
+        <th>预测口径值</th><th>实际口径值</th><th>误差(实际-预测)</th><th>绝对误差%</th><th>覆盖率</th>
+      </tr></thead>
+      <tbody>
+        ${g.orders.map((r) => `
+          <tr>
+            <td><a href="#" class="order-timeline" data-order="${esc(r.orderId)}">${esc(r.orderId)}</a></td>
+            <td><span class="tag ${r.scale}">${r.scale}</span></td>
+            <td>${h(r.baselineHours)}</td>
+            <td>${h(r.scopeAddedHours)}</td>
+            <td>${h(r.replanHours)}</td>
+            <td>${h(r.forecastHours)}</td>
+            <td>${h(r.actualHours)}</td>
+            <td>${signed(r.forecastError)}</td>
+            <td>${pct(r.absErrorPct)}</td>
+            <td>${pct(r.coveragePct)}</td>
+          </tr>`).join('')}
+      </tbody>
+      <tfoot><tr>
+        <td class="label">分组汇总</td><td></td><td></td><td></td><td></td>
+        <td>${h(g.sumForecastHours)}</td><td>${h(g.sumActualHours)}</td>
+        <td>${signed(g.sumErrorHours)}</td>
+        <td>MAPE ${pct(g.mape)} / 加权 ${pct(g.weightedMape)}</td>
+        <td>${pct(g.coveragePct)}</td>
+      </tr></tfoot>
+    </table>`).join('');
+
+  const o = data.overall;
+  const html = `
+    <p class="muted">口径：<b>${modeName}</b> ｜ 生成于 ${esc(data.generatedAt)}
+       ｜ 纳入评估 ${o.evaluatedOrders}/${o.totalOrders} 单（数据覆盖率 ${pct(o.dataCoveragePct)}，
+       有 baseline 的工单 ${o.ordersWithBaseline} 单）</p>
+    ${groupHtml}
+    <h2>总体</h2>
+    <table>
+      <tbody>
+        <tr><td class="label">预测工时合计 / 实际工时合计</td><td>${h(o.sumForecastHours)} / ${h(o.sumActualHours)}</td></tr>
+        <tr><td class="label">误差合计（带符号）</td><td>${signed(o.sumErrorHours)}</td></tr>
+        <tr><td class="label">绝对误差合计</td><td>${h(o.sumAbsErrorHours)}</td></tr>
+        <tr><td class="label">MAPE（各单绝对误差%均值）</td><td>${pct(o.mape, 2)}</td></tr>
+        <tr><td class="label">加权 MAPE（绝对误差合计/预测合计）</td><td>${pct(o.weightedMape, 2)}</td></tr>
+        <tr><td class="label">总体覆盖率（实际/预测）</td><td>${pct(o.coveragePct, 2)}</td></tr>
+      </tbody>
+    </table>
+    <h2>剔除工单（不参与统计）</h2>
+    ${data.excluded.length === 0 ? '<p class="muted">无</p>' : `
+      <table><thead><tr><th>工单</th><th>剔除原因</th></tr></thead><tbody>
+        ${data.excluded.map((x) => `<tr><td>${esc(x.orderId)}</td><td class="label">${esc(x.reason)}</td></tr>`).join('')}
+      </tbody></table>`}
+    <p class="muted">点击工单编号可查看其留版时间线与预测差异区间。</p>`;
+
+  publish('evaluate:' + mode, data, html);
+  bindTimelineLinks();
+}
+
+async function runDecompose() {
+  const mode = currentMode();
+  const data = await api('/api/decompose?mode=' + encodeURIComponent(mode));
+  const c = data.components;
+  const html = `
+    <p class="muted">口径：<b>${mode === 'phase_replan' ? '阶段重估' : '范围变动单列'}</b>
+       ｜ 误差分解基于 ${data.orderCount} 个完整工单；identityCheck 应为 0（恒等式闭合）。</p>
+    <h2>分量汇总</h2>
+    <table><thead><tr><th>分量</th><th>工时</th><th>含义</th></tr></thead><tbody>
+      <tr><td class="label">计划误差</td><td>${signed(c.planError)}</td><td class="label">核心实际 − 原 baseline（原目标保持不变）</td></tr>
+      <tr><td class="label">范围变动（追加需求，单列）</td><td>${signed(c.scopeChange)}</td><td class="label">scope_change 记录之和，不混入计划误差</td></tr>
+      <tr><td class="label">阶段重估调整</td><td>${signed(c.replan)}</td><td class="label">replan 记录之和（可为负）</td></tr>
+      <tr><td class="label">残余误差</td><td>${signed(c.residual)}</td><td class="label">${mode === 'phase_replan' ? '实际总工时 − 最新累计预测' : '单列口径下等于计划误差'}</td></tr>
+    </tbody></table>
+    <h2>逐单分解</h2>
+    <table><thead><tr>
+      <th>工单</th><th>baseline</th><th>核心实际</th><th>计划误差</th><th>范围变动</th>
+      <th>重估</th><th>最新预测</th><th>实际总工时</th><th>残余</th><th>闭合检查</th>
+    </tr></thead><tbody>
+      ${data.perOrder.map((d) => `
+        <tr>
+          <td><a href="#" class="order-timeline" data-order="${esc(d.orderId)}">${esc(d.orderId)}</a></td>
+          <td>${h(d.baselineHours)}</td><td>${h(d.coreActualHours)}</td>
+          <td>${signed(d.components.planError)}</td>
+          <td>${signed(d.components.scopeChange)}</td>
+          <td>${signed(d.components.replan)}</td>
+          <td>${h(d.finalForecastHours)}</td>
+          <td>${h(d.actualTotalHours)}</td>
+          <td>${signed(d.components.residual)}</td>
+          <td class="${Math.abs(d.identityCheck) < 1e-9 ? 'muted' : 'pos'}">${d.identityCheck.toFixed(9)}</td>
+        </tr>`).join('')}
+    </tbody></table>`;
+  publish('decompose:' + mode, data, html);
+  bindTimelineLinks();
+}
+
+async function showTimeline(orderId) {
+  const data = await api('/api/orders/' + encodeURIComponent(orderId) + '/timeline');
+  const env = data.envelope;
+  const html = `
+    <h2>工单 ${esc(data.orderId)} 留版时间线（${data.correctionCount} 次更正）</h2>
+    <table><thead><tr>
+      <th>时间</th><th>记录</th><th>类型</th><th>本版工时</th><th>累计预测</th><th>累计实际</th><th>说明</th>
+    </tr></thead><tbody>
+      ${data.events.map((e) => `
+        <tr class="timeline-row">
+          <td class="label">${esc(e.timestamp)}</td>
+          <td>${esc(e.recordId)}</td>
+          <td><span class="badge ${e.type ?? 'actual'}">${esc(e.type ?? 'actual')}</span></td>
+          <td>${h(e.hours)}</td>
+          <td>${e.cumulativeForecast !== undefined ? h(e.cumulativeForecast) : '—'}</td>
+          <td>${e.cumulativeActual !== undefined ? h(e.cumulativeActual) : '—'}</td>
+          <td class="label">${esc(e.note ?? '')}</td>
+        </tr>`).join('')}
+    </tbody></table>
+    <h2>预测差异区间</h2>
+    ${env ? `<table><tbody>
+      <tr><td class="label">首个预测（baseline 起点）</td><td>${h(env.first)}</td></tr>
+      <tr><td class="label">最新累计预测</td><td>${h(env.latest)}</td></tr>
+      <tr><td class="label">区间最小值 / 最大值</td><td>${h(env.min)} / ${h(env.max)}</td></tr>
+      <tr><td class="label">差异区间宽度（max − min）</td><td>${h(env.width)}</td></tr>
+      <tr><td class="label">首末漂移（latest − first）</td><td>${signed(env.drift)}</td></tr>
+    </tbody></table>` : '<p class="muted">暂无估时记录</p>'}
+    <h2>更正记录（独立留版，原 baseline 未被改写）</h2>
+    ${data.corrections.length === 0 ? '<p class="muted">无更正</p>' : `
+      <table><thead><tr><th>记录</th><th>类型</th><th>时间</th><th>本次变动</th><th>变动后累计预测</th><th>说明</th></tr></thead><tbody>
+        ${data.corrections.map((c) => `
+          <tr><td>${esc(c.recordId)}</td><td><span class="badge ${c.type}">${esc(c.type)}</span></td>
+          <td>${esc(c.timestamp)}</td><td>${signed(c.deltaHours)}</td>
+          <td>${h(c.cumulativeForecast)}</td><td class="label">${esc(c.note)}</td></tr>`).join('')}
+      </tbody></table>`}`;
+  publish('timeline:' + orderId, data, html);
+}
+
+function bindTimelineLinks() {
+  document.querySelectorAll('.order-timeline').forEach((a) => {
+    a.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      try { await showTimeline(a.dataset.order); }
+      catch (e) { showFlash('err', e.message); }
+    });
+  });
+}
+
+async function submitScopeChange() {
+  const payload = {
+    orderId: $('scope-order').value,
+    type: $('scope-type').value,
+    hours: Number($('scope-hours').value),
+    note: $('scope-note').value,
+    timestamp: new Date().toISOString(),
+  };
+  if (!Number.isFinite(payload.hours)) throw new Error('追加工时必须是数字');
+  const estimate = await api('/api/estimates', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  let actual = null;
+  const actualRaw = $('scope-actual').value.trim();
+  if (actualRaw !== '') {
+    actual = await api('/api/actuals', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        orderId: payload.orderId,
+        hours: Number(actualRaw),
+        timestamp: new Date().toISOString(),
+        note: payload.type === 'scope_change' ? 'scope' : '',
+      }),
+    });
+  }
+  const html = `
+    <h2>补录成功（仅追加留版）</h2>
+    <p>工单 <b>${esc(payload.orderId)}</b> 新增估时记录
+       <code>${esc(estimate.record.id)}</code>（${esc(estimate.record.type)}，
+       ${signed(estimate.record.hours)}），变动后累计预测 <b>${h(estimate.record.cumulativeForecast)}</b>。
+       原 baseline 记录保持不变。</p>
+    ${actual ? `<p>同时补录实际记录 <code>${esc(actual.record.id)}</code>（${h(actual.record.hours)}）。</p>` : ''}
+    <p class="muted">可重新「运行原估时评估」查看误差与覆盖变化，或点工单时间线查看差异区间。</p>`;
+  publish('scope-change', { estimate, actual }, html);
+  showFlash('ok', `已追加记录 ${estimate.record.id}，历史版本未改动`);
+}
+
+function wire(btn, fn) {
+  btn.addEventListener('click', async () => {
+    const buttons = document.querySelectorAll('button');
+    buttons.forEach((b) => (b.disabled = true));
+    try {
+      await fn();
+    } catch (e) {
+      showFlash('err', e.message);
+    } finally {
+      buttons.forEach((b) => (b.disabled = false));
+    }
+  });
+}
+
+wire($('btn-evaluate'), runEvaluation);
+wire($('btn-decompose'), runDecompose);
+wire($('btn-scope'), submitScopeChange);
+wire($('btn-reset'), async () => {
+  await api('/api/reset', { method: 'POST' });
+  await loadOrders();
+  showFlash('ok', '已重置为初始合成数据');
+  resultEl.setAttribute('data-evidence-result', JSON.stringify({ label: 'reset', payload: { reset: true } }));
+  resultEl.innerHTML = '<p class="muted">已重置，请重新运行评估。</p>';
+});
+document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener('change', () => {
+  showFlash('ok', '评估口径已切换为：' + (currentMode() === 'phase_replan' ? '阶段重估' : '范围变动单列'));
+}));
+
+loadOrders().catch((e) => showFlash('err', e.message));
+</script>
+</body>
+</html>
